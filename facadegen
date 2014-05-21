@@ -1,0 +1,422 @@
+#!/usr/bin/env lua
+--[[----------------------------------------------------------------------------
+Copyright © 2014 Pierre Neidhardt <ambrevar at gmail dot com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+--]]----------------------------------------------------------------------------
+
+--[[----------------------------------------------------------------------------
+This is a prototype of a facade generator using a split grammar.
+
+Two important structures:
+
+The 'config' holds the hiererachy of the various shapes composing the facade.
+Example:
+
+config = {
+   {
+      type = "facade"
+      attr = {x = 0, y = 0, width = 100, height = 30}
+      children = {
+         {
+             type = "floor"
+             attr = {x = 0, y = 0, width = 100, height = 10}
+             children = {
+                {
+                    type = "window"
+                    attr = {x = 0, y = 0, width = 10, height = 10}
+                },
+                -- More windows...
+             }
+         },
+         -- More floors...
+   }
+}
+
+The only requirements for the initial configuration is to have at least one
+shape:
+
+config = {
+   {
+      type = "facade",
+      attr = {x=0, y=0, width=50, height=100}
+   }
+}
+
+When the config gets derived, the children tables are filled with the shapes
+derived by the grammar.
+
+The 'grammar' structure holds a set of rules associated with each type of shape.
+grammar =  {
+   facade = { op = "and",
+      {
+         action = split,
+         param = {dir = "y", {"facade_top", -0.7}, {"plaster", -0.1}, {"facade_bottom"}},
+      },
+      {
+         action = draw,
+         param = concrete
+      }
+   },
+   facade_bottom = {{
+         action = split,
+         param = {dir = "x", {"window", -0.3}, {"concrete", -0.4}, {"window"}},
+   }},
+   facade_top = {{
+         action = rep,
+         param = {dir = "y", "elem", -0.2},
+   }},
+   elem = {{
+         action = split,
+         param = {dir = "y", {"plaster", -0.3} , {"floor"}},
+   }},
+   floor = { op = "or",
+      {
+         condition = function () return math.random() < 0.5 end,
+         action = split,
+         param = {dir = "x", {"concrete", -0.05}, {"window"}, {"concrete", -0.05}, {"window"}, {"concrete", -0.05}, {"window"}, {"concrete", -0.05}},
+      },
+      {
+         action = split,
+         param = {dir = "x", {"concrete", -0.1}, {"window"}, {"concrete", -0.1}, {"window"}, {"concrete", -0.1}},
+      }
+   },
+   plaster = {{
+         action = draw,
+         param = plaster
+   }},
+   window = {{
+         action = draw,
+         param = window
+   }}
+}
+
+Main references:
+   * Wonka et al. 2003
+   * Müller, Wonka et al. 2006
+--]]----------------------------------------------------------------------------
+
+local APPNAME = 'facadegen'
+local VERSION = 'dev'
+local YEAR = 2014
+local AUTHOR = 'P. Neidhardt'
+
+-- Libraries
+local cairo = require 'oocairo'
+local lapp = require 'pl.lapp'
+
+-- Folders
+local texture_folder = 'textures/'
+local input_folder = 'input/'
+
+-- Command-line arguments. This uses the LAPP library:
+-- http://lua-users.org/wiki/CommandLineParsing
+local help = [[
+Usage: facadegen [OPTIONS] <config> <grammar>
+
+Parameters:
+  <config> (string)               Facade initial configuration.
+  <grammar> (string)              Grammar file.
+
+Options:
+  -d,--debug                      Enable trace and contours.
+  -h,--help                       Print this help.
+  -o,--output (default 'out.png') Output file.
+  -p,--predictable                Disable randomness.
+  -V,--version                    Print version information.
+  -x (default 1024)               Horizontal resolution.
+  -y (default 1024)               Vertical resolution.
+]]
+local args = lapp (help)
+
+function version ()
+   print (APPNAME .. ' ' .. VERSION .. ' Copyright (C) ' .. YEAR .. ' ' .. AUTHOR)
+end
+if args.version then
+   version ()
+   os.exit ()
+end
+if args.help then
+   print (help)
+   os.exit ()
+end
+
+--------------------------------------------------------------------------------
+-- TODO: the following is global. Should we restrict it in some way?
+
+-- Cairo context.
+context = nil
+
+-- Some common colors. TODO: Shall we get rid of it? Store it separately maybe?
+red = {1.0, 0.0, 0.0}
+green = {0.0, 1.0, 0.0}
+blue = {0.0, 0.0, 1.0}
+black = {0.0, 0.0, 0.0}
+white = {1.0, 1.0, 1.0}
+
+--[[ Materials
+[1] [2] and [3] are the RGB colors between 0 and 1.
+['texture'] is a path to a texture file.
+If texture is missing, then we fall back on the color.
+]]--
+concrete = {191/255, 178/255, 144/255, texture = texture_folder .. 'concrete.png'}
+plaster = {253/255, 217/255, 160/255, texture = texture_folder .. 'plaster.png'}
+window = {80/255, 173/255, 229/255, texture = texture_folder .. 'window1.png'}
+sill = {239/255, 189/255, 205/255, texture = texture_folder .. 'wood.png'}
+door = {242/255, 215/255, 93/255}
+
+--------------------------------------------------------------------------------
+
+--[[ First we check if object fits in parent (attr). If not, we return false and
+we go on with the next rule. If yes, we return true and we stop here with the
+rule set if the operator is 'or'.
+
+If a size in param is:
+  0: extensible
+ <0: relative size (should be <= 1)
+ >0: absolute size in meters
+--]]
+function split (shape, param)
+   local attr = shape.attr
+   -- TODO: merge the first loop with the 2nd one?
+   local max = param.dir == 'x' and attr.width or attr.height
+
+   -- Check it size fits.
+   local length = 0
+   local extcount = 0
+   for _, v in ipairs (param) do
+      local l = v[2] or 0
+      if l > 0 then
+         -- Absolute size
+         length = length + l
+      elseif l == 0 then
+         extcount = extcount + 1
+      else
+         -- Relative size
+         length = length - l * max
+      end
+   end
+
+   if length > max then
+      if args.debug then
+         print ('Child of size [' .. length .. '] does not fit in parent of size [' .. max .. '].')
+      end
+      return false
+   end
+
+   -- Each extensible shape gets 'extlength'.
+   local extlength = extcount ~= 0 and (max - length)/extcount or 0
+   -- Init sub shapes table.
+   shape.children = {}
+   local children = shape.children
+   -- Coordinates
+   local x,y = attr.x, attr.y
+
+   for _, v in ipairs (param) do
+      local delta = 0
+      local l = v[2] or 0
+      if l > 0 then
+         delta = l
+      elseif l == 0 then
+         delta = extlength
+      else
+         delta = - l * max
+      end
+
+      -- If delta is 0 (no room for extensible shapes), then we skip current
+      -- shape.
+      if delta ~= 0 then
+         if param.dir == 'x' then
+            dx, dy = delta, attr.height
+         else
+            dx, dy = attr.width, delta
+         end
+         table.insert (children,
+                      {type = v[1],
+                       active = true,
+                       attr = { x = x, y = y, width = dx, height = dy }})
+         if args.debug then print (v[1], x, y, dx, dy) end
+         if param.dir == 'x' then
+            x = x + dx
+         else
+            y = y + dy
+         end
+      end
+   end
+   return true
+end
+
+--[[ The number is the size of the object. If the ratio with the size of the
+parent is not an integer, then we change it to the nearest integer. For
+instance, for a size of -0.4, the ratio is 1/0.4 = 2.5, so we round to 3 and
+we thus get a size of -1/3.
+param = {dir = x/y, object, size}
+--]]
+function rep (shape, param)
+   local attr = shape.attr
+   local size
+   local max = param.dir == 'x' and attr.width or attr.height
+   local start = param.dir == 'x' and attr.x or attr.y
+
+   -- Horizontal
+   if param[2] > 0 then
+      -- Absolute size
+      size = param[2]
+   else
+      -- Relative size
+      size = -param[2] * max
+   end
+
+   size = max / math.floor (max/size + 0.5)
+   if size > max then
+      if args.debug then
+         print ('Child of size [' .. size .. '] does not fit in parent of size [' .. max .. '].')
+      end
+      return false
+   end
+
+   -- We use an index table to manipulate the last value. This way we can fix
+   -- rounding error. A rounding issue arise for instance with a max size of
+   -- 100, param[2] = -1/3. Then we should have 3 iterations, but after the 2nd
+   -- one:
+   --   (100/3 + 100/3 <= 100 - 100/3) == false.
+   local index = {}
+   for i = start, start + max -size, size do
+      index[i] = size
+   end
+   index[start + max - size] = size
+
+   -- Init sub shapes table.
+   shape.children = {}
+   local children = shape.children
+   -- Fill in new sub shapes.
+   for coord, size in pairs(index) do
+      if param.dir == 'x' then
+         table.insert (children,
+                      {type = param[1],
+                       active = true,
+                       attr = { x = coord, y = attr.y, width = size, height = attr.height }})
+      else
+         table.insert (children,
+                      {type = param[1],
+                       active = true,
+                       attr = { x = attr.x, y = coord, width = attr.width, height = size }})
+      end
+      if args.debug then
+         print (children[#children].type,
+                children[#children].attr.x,
+                children[#children].attr.y,
+                children[#children].attr.width,
+                children[#children].attr.height)
+      end
+   end
+
+   return true
+end
+
+function draw (shape, param)
+   local attr = shape.attr
+
+   if param.texture then
+      local texture
+      local status, err =  pcall (function () texture = cairo.image_surface_create_from_png (param.texture) end)
+      if status then
+         local w = texture:get_width ()
+         local h = texture:get_height ()
+
+         context:save ()
+         context:translate (attr.x, attr.y)
+         context:rectangle (0, 0, attr.width, attr.height)
+         context:scale (attr.width/w, attr.height/h)
+         context:set_source (texture, 0, 0);
+         context:fill_preserve ()
+         context:restore ()
+      else
+         print (err)
+         param.texture = nil
+      end
+   end
+   if not param.texture then
+      context:set_source_rgb (param[1], param[2], param[3])
+      context:rectangle (attr.x, attr.y, attr.width, attr.height)
+      context:fill_preserve ()
+   end
+   if args.debug then
+      context:set_line_width (0.2)
+      context:set_source_rgba (1, 0, 0, 0.6)
+      context:stroke ()
+   end
+   context:new_path ()
+end
+
+function derive (config, grammar, outfile)
+   -- Cairo setup.
+   local cs = cairo.image_surface_create ('rgb24', args.x, args.y)
+   -- TODO: here we set the global 'context'. Find a better way to transfer the
+   -- context do draw().
+   context = cairo.context_create (cs)
+
+   -- The first element attributes should be the maximum size.
+   context:scale (args.x / config[1].attr.width, args.y / config[1].attr.height)
+
+   -- We need to perform a breath-first traversal of the tree. This way we
+   -- proceed with an increased level of details.
+   local subconfig = config
+   while #subconfig ~= 0 do
+      local queue = {}
+      for _, shape in ipairs(subconfig) do
+
+         for key, ruleset in pairs (grammar) do
+            if key == shape.type then
+               for _, rule in ipairs (ruleset) do
+                  if not rule.condition or rule.condition (shape.attr) then
+                     local valid = rule.action (shape, rule.param)
+                     if valid and ruleset.op and ruleset.op == 'or' then
+                        break
+                     end
+                  end
+               end
+            end
+         end
+         -- Add derived shapes in queue if any.
+         if shape.children then
+            for _, v in ipairs(shape.children) do table.insert(queue, v) end
+         end
+      end
+      subconfig = queue
+   end
+
+   io.write('Writing output to ' .. outfile .. '...')
+   io.flush()
+   cs:write_to_png (outfile)
+   io.write(' Done!\n')
+
+end
+
+--------------------------------------------------------------------------------
+
+local config = dofile (args.config)
+local grammar = dofile (args.grammar)
+
+-- Init randomness. If the randomseed is predictable, so is the result.
+if not args.predictable then math.randomseed (os.time()) end
+
+-- Run.
+derive (config, grammar, args.output)
+
+-- End of file.

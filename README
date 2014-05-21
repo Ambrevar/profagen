@@ -1,0 +1,40 @@
+Facadegen: a procedural facade generator
+
+Usage
+=====
+
+See
+  $ facadegen --help
+or
+  $ facadegen -h
+
+Dependencies
+============
+
+* Lua >= 5.1
+
+Lua libraries:
+* Lapp
+* oocairo
+
+oocairo is a single file library that can be easily installed, even without root
+privildges. Fetch the .so file and set the LUA_CPATH environment variable to
+point to it. For instance:
+
+  export LUA_CPATH="$HOME/local/usr/lib/lib?.so;$(lua -e "print(package.cpath)")"
+
+If you do not set LUA_CPATH, the dependencies will be found where the default
+paths point. Usually, the current folder is included, so the dependencies can be
+installed followind this hierarchy:
+
+├── facadegen
+├── liboocairo.so
+└── pl
+    ├── lapp.lua
+    └── sip.lua
+
+
+License
+=======
+
+See LICENSE.
