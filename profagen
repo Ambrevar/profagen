@@ -111,7 +111,7 @@ Main references:
    * Müller, Wonka et al. 2006
 --]]----------------------------------------------------------------------------
 
-local APPNAME = 'facadegen'
+local APPNAME = 'profagen'
 local VERSION = 'dev'
 local YEAR = 2014
 local AUTHOR = 'P. Neidhardt'
@@ -127,7 +127,7 @@ local input_folder = 'input/'
 -- Command-line arguments. This uses the LAPP library:
 -- http://lua-users.org/wiki/CommandLineParsing
 local help = [[
-Usage: facadegen [OPTIONS] <config> <grammar>
+Usage: ]] .. APPNAME .. [[ [OPTIONS] <config> <grammar>
 
 Parameters:
   <config> (string)               Facade initial configuration.

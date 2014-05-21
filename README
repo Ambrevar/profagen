@@ -1,12 +1,12 @@
-Facadegen: a procedural facade generator
+profagen: a procedural facade generator
 
 Usage
 =====
 
 See
-  $ facadegen --help
+  $ profagen --help
 or
-  $ facadegen -h
+  $ profagen -h
 
 Dependencies
 ============
@@ -27,7 +27,7 @@ If you do not set LUA_CPATH, the dependencies will be found where the default
 paths point. Usually, the current folder is included, so the dependencies can be
 installed followind this hierarchy:
 
-├── facadegen
+├── profagen
 ├── liboocairo.so
 └── pl
     ├── lapp.lua
